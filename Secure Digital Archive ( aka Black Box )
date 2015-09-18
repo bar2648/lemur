@@ -1,0 +1,860 @@
+/* 
+ *  
+ * * 
+ * * LEMUR - SECURE DIGITAL ARCHIVE
+ * * 
+ * * [ LICENSE OR SOMETHING ]
+ * * 
+ * * Created by Bartlomiej Zdrojewski ( 2015 )
+ * * 
+ * 
+ */
+
+/* 
+ *  
+ * Configuration of the Microcontroller
+ *  
+ */
+
+#define SPI_CS 2
+#define SPI_MOSI 3
+#define SPI_MISO 4
+#define SPI_SCK 5
+
+#define CORE_OUTPUT 0
+
+/* 
+ *  
+ * Declarations of the Global Constants
+ *  
+ */
+
+#define SIGNATURE "LEMUR"
+
+#define SP_TIMEOUT_VALUE 100
+#define SP_TIMEOUT_SENSOR 2000
+
+#define SD_TIMEOUT_INIT 1000
+#define SD_TIMEOUT_READ 300
+#define SD_TIMEOUT_WRITE 600
+
+#define SD_RESPONSE_SUCCESS 0
+#define SD_RESPONSE_FAILURE 1
+#define SD_RESPONSE_TIMEOUT 2
+
+#define SDA_RESPONSE_SUCCESS 0
+#define SDA_RESPONSE_FAILURE 3
+#define SDA_RESPONSE_OVERRANGE 4
+
+#define CORE_STATE_ACTIVE 0
+#define CORE_STATE_BREAKDOWN 1
+#define CORE_STATE_OVERRANGE 2
+
+/* 
+ *  
+ * Declarations of the Global Values
+ *  
+ */
+
+char Data [ 512 ];
+char Signature [ 8 ] = SIGNATURE;
+
+uint32_t SP_Time;
+uint32_t SD_Time;
+uint32_t SD_Timeout;
+
+uint16_t SDA_Session;
+uint32_t SDA_Sector;
+uint16_t SDA_Offset;
+
+uint8_t CORE_STATE = CORE_STATE_ACTIVE;
+
+/* 
+ *  
+ * Declarations of the Main Functions
+ *  
+ */
+
+void setup ( );
+void loop ( );
+
+/* 
+ *  
+ * Declarations of the Auxiliary Functions
+ *  
+ */
+
+// Functions of Serial Port Communication
+void SP_Init ( );
+int8_t SP_Available ( );
+int8_t SP_Read ( uint32_t Timeout = 0 );
+int8_t SP_Write ( int8_t Byte );
+
+// Functions of SPI Communication
+void SPI_Init ( );
+int8_t SPI_Send ( int8_t Byte );
+
+// Functions of Secure Digital Interface
+int8_t SD_Init ( );
+int8_t SD_Command ( char CMD, uint32_t Argument, int8_t CRC ); // or int8_t CMD ?
+int8_t SD_Read ( uint32_t Sector );
+int8_t SD_Write ( uint32_t Sector );
+
+// Functions of Secure Digital Archive
+int8_t SDA_IsFormated ( );
+int8_t SDA_Format ( );
+int8_t SDA_EstablishSession ( );
+int8_t SDA_ManageSession ( int8_t Byte );
+int8_t SDA_ManageSession ( int8_t * Bytes, uint16_t Size );
+
+/* 
+ *  
+ * Definitions of the Main Functions
+ *  
+ */
+
+void setup ( ) {
+  
+  DDRC |= ( 1 << CORE_OUTPUT );
+  PORTC |= ( 1 << CORE_OUTPUT );
+  
+  SP_Init();
+  SPI_Init();
+  
+  if ( CORE_STATE == CORE_STATE_ACTIVE ) {
+    
+    int8_t Retry;
+    int8_t Response;
+    
+    for ( Retry = 5; Retry > 0; Retry-- ) {
+      
+      int8_t Response = SD_Init();
+      
+      if ( Response != SD_RESPONSE_TIMEOUT ) {
+        
+        break; } }
+
+    if ( !Retry || Response == SD_RESPONSE_FAILURE ) {
+      
+      CORE_STATE = CORE_STATE_BREAKDOWN; } }
+  
+  if ( CORE_STATE == CORE_STATE_ACTIVE ) {
+    
+    int8_t Retry;
+    int8_t Response;
+    
+    for ( Retry = 5; Retry > 0; Retry-- ) {
+      
+      Response = SDA_IsFormated();
+      
+      if ( Response != SD_RESPONSE_TIMEOUT ) {
+        
+        break; } }
+    
+    if ( !Retry || Response == SD_RESPONSE_FAILURE ) {
+      
+      CORE_STATE = CORE_STATE_BREAKDOWN; }
+    
+    else if ( Response == SDA_RESPONSE_FAILURE ) {
+      
+      for ( Retry = 5; Retry > 0; Retry-- ) {
+        
+        Response = SDA_Format();
+        
+        if ( Response != SD_RESPONSE_TIMEOUT ) {
+        
+          break; } }
+
+      if ( !Retry || Response == SD_RESPONSE_FAILURE ) {
+      
+        CORE_STATE = CORE_STATE_BREAKDOWN; } } }
+
+  if ( CORE_STATE == CORE_STATE_ACTIVE ) {
+    
+    int8_t Retry;
+    int8_t Response;
+    
+    for ( Retry = 5; Retry > 0; Retry-- ) {
+      
+      int8_t Response = SDA_EstablishSession();
+      
+      if ( Response != SD_RESPONSE_TIMEOUT ) {
+        
+        break; } }
+
+    if ( !Retry || Response == SD_RESPONSE_FAILURE ) {
+      
+      CORE_STATE = CORE_STATE_BREAKDOWN; }
+
+    else if ( Response == SDA_RESPONSE_OVERRANGE ) {
+
+      CORE_STATE = CORE_STATE_OVERRANGE; } }
+  
+  PORTC &= ~( 1 << CORE_OUTPUT ); }
+
+void loop ( ) {
+  
+  if ( CORE_STATE == CORE_STATE_ACTIVE ) {    
+    
+    while ( CORE_STATE == CORE_STATE_ACTIVE && SP_Available() ) {
+      
+      PORTC |= ( 1 << CORE_OUTPUT );
+      
+      int8_t * Packet;
+      uint32_t Time = millis();
+      
+      switch ( SP_Read() ) {
+
+        case 33: // [ TEMPORARY ] [ ASCII CODE FOR '!' ] Write value 0x00 to Secure Digital Device
+
+          SDA_ManageSession( 0 );
+          
+          break;
+        
+        case 52: // [ ASCII CODE FOR '4' ] Write engine failure packet to Secure Digital Device
+          
+          Packet = new int8_t [ 6 ]; // [ FORMAT IS 'VALUE [BITS]' ] Packet is equal to { Time [32], 0x00 [1], 0x01 [7], Code [8] }
+          
+          Packet[0] = Time;
+          Packet[1] = Time >> 8;
+          Packet[2] = Time >> 16;
+          Packet[3] = Time >> 24;
+          Packet[4] = 0x01;
+          Packet[5] = SP_Read( SP_TIMEOUT_VALUE );
+          
+          switch ( SDA_ManageSession( Packet, 6 ) ) {
+            
+            case SDA_RESPONSE_FAILURE:
+              
+              CORE_STATE = CORE_STATE_BREAKDOWN;
+              
+              break;
+              
+            case SDA_RESPONSE_OVERRANGE:
+              
+              CORE_STATE = CORE_STATE_OVERRANGE;
+              
+              break; }
+          
+          delete Packet;
+          
+          break;
+        
+        case 53: // [ ASCII CODE FOR '5' ] Write engine success packet to Secure Digital Device
+          
+          Packet = new int8_t [ 6 ]; // [ FORMAT IS 'VALUE [BITS]' ] Packet is equal to { Time [32], 0x01 [1], 0x01 [7], Code [8] }
+          
+          Packet[0] = Time;
+          Packet[1] = Time >> 8;
+          Packet[2] = Time >> 16;
+          Packet[3] = Time >> 24;
+          Packet[4] = 0x81;
+          Packet[5] = SP_Read( SP_TIMEOUT_VALUE );
+          
+          switch ( SDA_ManageSession( Packet, 6 ) ) {
+            
+            case SDA_RESPONSE_FAILURE:
+              
+              CORE_STATE = CORE_STATE_BREAKDOWN;
+              
+              break;
+            
+            case SDA_RESPONSE_OVERRANGE:
+              
+              CORE_STATE = CORE_STATE_OVERRANGE;
+              
+              break; }
+          
+          delete Packet;
+          
+          break;
+
+        case 92: // [ ASCII CODE FOR '\' ] Write sensor packet to Secure Digital Device
+          
+          Packet = new int8_t [ 39 ]; // [ FORMAT IS 'VALUE [BITS]' ] Packet is equal to 2 times { Time [32], 0x00 or 0x01 [1], Type [7], Value [8] } and 4 times { Time [32], 0x00 or 0x01 [1], Type [7], ValueLow [8], ValueHigh [8] }
+          
+          Packet[0] = Time;
+          Packet[1] = Time >> 8;
+          Packet[2] = Time >> 16;
+          Packet[3] = Time >> 24;
+          Packet[5] = SP_Read( SP_TIMEOUT_SENSOR );
+          Packet[4] = SP_Time > SP_TIMEOUT_SENSOR ? 0x02 : 0x82;
+
+          Packet[6] = Time;
+          Packet[7] = Time >> 8;
+          Packet[8] = Time >> 16;
+          Packet[9] = Time >> 24;
+          Packet[11] = SP_Read( SP_TIMEOUT_SENSOR );
+          Packet[10] = SP_Time > SP_TIMEOUT_SENSOR ? 0x02 : 0x82;
+          
+          Packet[11] = Time;
+          Packet[12] = Time >> 8;
+          Packet[13] = Time >> 16;
+          Packet[14] = Time >> 24;
+          Packet[17] = SP_Read( SP_TIMEOUT_SENSOR );
+          Packet[16] = SP_Time > SP_TIMEOUT_SENSOR ? 0x00 : SP_Read( SP_TIMEOUT_VALUE );
+          Packet[15] = SP_Time > SP_TIMEOUT_SENSOR ? 0x03 : 0x83;
+
+          Packet[18] = Time;
+          Packet[19] = Time >> 8;
+          Packet[20] = Time >> 16;
+          Packet[21] = Time >> 24;
+          Packet[24] = SP_Read( SP_TIMEOUT_SENSOR );
+          Packet[23] = SP_Time > SP_TIMEOUT_SENSOR ? 0x00 : SP_Read( SP_TIMEOUT_VALUE );
+          Packet[22] = SP_Time > SP_TIMEOUT_SENSOR ? 0x04 : 0x84;
+
+          Packet[25] = Time;
+          Packet[26] = Time >> 8;
+          Packet[27] = Time >> 16;
+          Packet[28] = Time >> 24;
+          Packet[31] = SP_Read( SP_TIMEOUT_SENSOR );
+          Packet[30] = SP_Time > SP_TIMEOUT_SENSOR ? 0x00 : SP_Read( SP_TIMEOUT_VALUE );
+          Packet[29] = SP_Time > SP_TIMEOUT_SENSOR ? 0x00 : 0x85;
+
+          Packet[32] = Time;
+          Packet[33] = Time >> 8;
+          Packet[34] = Time >> 16;
+          Packet[35] = Time >> 24;
+          Packet[38] = SP_Read( SP_TIMEOUT_SENSOR );
+          Packet[37] = SP_Time > SP_TIMEOUT_SENSOR ? 0x00 : SP_Read( SP_TIMEOUT_VALUE );
+          Packet[36] = SP_Time > SP_TIMEOUT_SENSOR ? 0x00 : 0x85;
+          
+          switch( SDA_ManageSession( Packet, 39 ) ) {
+            
+            case SDA_RESPONSE_FAILURE:
+              
+              CORE_STATE = CORE_STATE_BREAKDOWN;
+              
+              break;
+            
+            case SDA_RESPONSE_OVERRANGE:
+              
+              CORE_STATE = CORE_STATE_OVERRANGE;
+              
+              break; }
+          
+          delete Packet;
+          
+          break;
+        
+        case 255: // [ ASCII CODE FOR '˙' ] Send value 0xFF through Serial Port Communication
+          
+          SP_Write( 255 );
+          
+          break;
+        
+        default:
+
+          break; }
+
+      PORTC &= ~( 1 << CORE_OUTPUT ); } }
+
+  else {
+    
+    if ( CORE_STATE == CORE_STATE_BREAKDOWN ) {
+
+      PORTC |= ( 1 << CORE_OUTPUT );
+      
+      delay( 100 );
+
+      PORTC &= ~( 1 << CORE_OUTPUT );
+      
+      delay( 100 ); }
+
+    else if ( CORE_STATE == CORE_STATE_OVERRANGE ) {
+
+      PORTC |= ( 1 << CORE_OUTPUT );
+      
+      delay( 1000 );
+
+      PORTC &= ~( 1 << CORE_OUTPUT );
+      
+      delay( 1000 ); } } }
+
+/* 
+ *  
+ * Definitions of the Auxiliary Functions
+ *  
+ */
+
+// Initiate Serial Port Communication
+void SP_Init ( ) {
+  
+  Serial.begin( 9600 );
+  Serial.setTimeout( 1500 ); }
+
+// Check if Serial Port Communication's buffer contains any data
+int8_t SP_Available ( ) {
+  
+  return Serial.available(); }
+
+// Read single byte form Serial Port Communication's buffer
+int8_t SP_Read ( uint32_t Timeout ) {
+  
+  uint32_t Time = millis();
+  
+  if ( Timeout != 0 ) {
+    
+    SP_Time = 0;
+    
+    while ( !SP_Available() ) {
+
+      SP_Time = millis() - Time;
+      
+      if ( SP_Time > Timeout ) {
+
+        return 0x00; } } }
+  
+  return Serial.read(); }
+
+// Send single byte through Serial Port Communication
+int8_t SP_Write ( int8_t Byte ) {
+  
+  return Serial.write( Byte ); }
+
+// Initiate SPI Communication
+void SPI_Init ( ) {
+  
+  DDRB = ( 1 << SPI_SCK ) | ( 1 << SPI_MOSI ) | ( 1 << SPI_CS );
+  DDRB &= ~( 1 << SPI_MISO );
+  
+  SPCR = ( 1 << SPE ) | ( 1 << MSTR ) | ( 1 << CPOL ) | ( 1 << CPHA ); }
+
+// Send single byte by SPI Communication
+int8_t SPI_Send ( int8_t Byte ) {
+  
+  SPDR = Byte;
+
+  while ( !( SPSR & ( 1 << SPIF ) ) );
+  
+  return SPDR; }
+
+// Initiate Secure Digital Interface
+int8_t SD_Init ( ) {
+
+  SPCR |= ( 1 << SPR0 );
+  PORTB |= ( 1 << SPI_CS );
+  
+  for ( char i = 0; i < 10; i++ ) {
+      
+      SPI_Send( 0xFF ); }
+  
+  PORTB &= ~( 1 << SPI_CS );
+  
+  for ( char i = 0; i < 2; i++ ) {
+      
+      SPI_Send( 0xFF ); }
+  
+  SD_Command( 0x40, 0, 0x95 );
+  
+  for ( SD_Time = millis(), SD_Timeout = millis() + SD_TIMEOUT_INIT; SD_Command( 0x41, 0, 0xFF ) != (char) 0x00; SD_Time = millis() ) {
+    
+    if ( SD_Time > SD_Timeout ) {
+      
+      return SD_RESPONSE_TIMEOUT; } }
+  
+  SPCR &= ~( 1 << SPR0 );
+  
+  return SD_RESPONSE_SUCCESS; }
+
+// Send single command to Secure Digital Interface
+int8_t SD_Command ( char CMD, uint32_t Argument, int8_t CRC ) {
+     
+  SPI_Send( 0xFF );
+  SPI_Send( CMD );
+  
+  SPI_Send( (uint8_t) ( Argument >> 24 ) );
+  SPI_Send( (uint8_t) ( Argument >> 16 ) );
+  SPI_Send( (uint8_t) ( Argument >> 8 ) );
+  SPI_Send( (uint8_t) Argument );
+  
+  SPI_Send( CRC );
+  SPI_Send( 0xFF );
+  
+  return SPI_Send( 0xFF ); }
+
+// Read data from single sector and store it in data buffer through Secure Digital Interface
+int8_t SD_Read ( uint32_t Sector ) {
+  
+  Sector <<= 9;
+  
+  if ( SD_Command( 0x51, Sector, 0xFF ) != (char) 0x00 ) {
+
+    return SD_RESPONSE_FAILURE; }
+
+  for ( SD_Time = millis(), SD_Timeout = millis() + SD_TIMEOUT_READ; SPI_Send( 0xFF ) != (char) 0xFE; SD_Time = millis() ) {
+
+    if ( SD_Time == SD_Timeout ) {
+      
+      return SD_RESPONSE_TIMEOUT; } }
+  
+  for ( uint16_t i = 0; i < 512; i++ ) {
+      
+      Data[i] = SPI_Send( 0xFF ); }
+  
+  SPI_Send( 0xFF );
+  SPI_Send( 0xFF );
+  
+  return SD_RESPONSE_SUCCESS; }
+
+// Write data from data buffer to single sector through Secure Digital Interface
+int8_t SD_Write ( uint32_t Sector ) { 
+    
+    Sector <<= 9;
+    
+    if ( SD_Command( 0x58, Sector, 0xFF ) != (char) 0x00 ) {
+
+      return SD_RESPONSE_FAILURE; }
+
+    SPI_Send( 0xFE );
+    
+    for ( uint16_t i = 0; i < 512; i++ ) {
+      
+      SPI_Send( Data[i] ); }
+    
+    SPI_Send( 0xFF );
+    SPI_Send( 0xFF );
+    
+    uint8_t WBR = SPI_Send ( 0xFF ) & 0x1F;
+    
+    if ( WBR != 0x05 ) {
+    
+        return SD_RESPONSE_FAILURE; }
+    
+    for ( SD_Time = millis(), SD_Timeout = millis() + SD_TIMEOUT_WRITE; SPI_Send( 0xFF ) != (char) 0xFF; SD_Time = millis() ) {
+
+      if ( SD_Time > SD_Timeout ) {
+        
+        return SD_RESPONSE_TIMEOUT; } }
+    
+    return SD_RESPONSE_SUCCESS; }
+
+// Check if Secure Digital Device is properly formatted
+int8_t SDA_IsFormated ( ) {
+
+  switch ( SD_Read( 0 ) ) {
+    
+    case SD_RESPONSE_SUCCESS:
+
+      for ( uint16_t i = 0; i < 8; i++ ) {
+      
+        if ( Data[i] != Signature[i] ) {
+        
+          return SDA_RESPONSE_FAILURE; } }
+
+      return SDA_RESPONSE_SUCCESS;
+
+    case SD_RESPONSE_FAILURE:
+
+      return SD_RESPONSE_FAILURE;
+
+    case SD_RESPONSE_TIMEOUT:
+
+      return SD_RESPONSE_TIMEOUT; } }
+
+// Format Secure Digital Device
+int8_t SDA_Format ( ) {
+  
+  for ( uint16_t i = 0; i < 512; i++ ) {
+    
+    Data[i] = 0x00; }
+  
+  strncpy( Data, Signature, sizeof( Signature ) );
+
+  switch ( SD_Write( 0 ) ) {
+    
+    case SD_RESPONSE_SUCCESS:
+
+        return SDA_RESPONSE_SUCCESS;
+
+    case SD_RESPONSE_FAILURE:
+
+        return SD_RESPONSE_FAILURE;
+
+    case SD_RESPONSE_TIMEOUT:
+        
+        return SD_RESPONSE_TIMEOUT; } }
+
+// Establish session with Secure Digital Device, which means finding a free sector
+int8_t SDA_EstablishSession ( ) {
+
+  SDA_Session = 0x0001;
+  SDA_Sector = 0x00000000;
+  SDA_Offset = 0x0002;
+  
+  uint32_t * SDA_Data = reinterpret_cast <uint32_t*> ( Data );
+  
+  while ( SDA_Session != 0xFFFA && SDA_Sector != 0xFFFFFFFF && SDA_Offset != 0xFFFF ) {
+
+    switch ( SD_Read( SDA_Sector ) ) {
+
+      case SD_RESPONSE_FAILURE:
+
+        return SD_RESPONSE_FAILURE;
+
+      case SD_RESPONSE_TIMEOUT:
+
+        return SD_RESPONSE_TIMEOUT; }
+
+    if ( SDA_Data[127] == 0x00000000 ) {
+    
+      while ( SDA_Data[SDA_Offset] != 0x00000000 ) {
+
+        SDA_Session++;
+        SDA_Offset++; }
+
+      if ( SDA_Offset != 127 ) {
+        
+        uint32_t SDA_FreeOffset = 0x0000;
+
+        if ( SDA_Sector == 0x00000000 ) {
+
+          SDA_FreeOffset = 0x0002; }
+    
+        if ( SDA_Offset == SDA_FreeOffset ) {
+          
+          SDA_Data[SDA_Offset] = SDA_Sector + 1;
+
+          switch ( SD_Write( SDA_Sector ) ) {
+
+            case SD_RESPONSE_FAILURE:
+
+              return SD_RESPONSE_FAILURE;
+
+            case SD_RESPONSE_TIMEOUT:
+
+              return SD_RESPONSE_TIMEOUT; }
+          
+          SDA_Sector = SDA_Sector + 1;
+          SDA_Offset = 0xFFFF; }
+
+        else {
+          
+          uint32_t SDA_FreeSector = SDA_Data[ SDA_Offset - 1 ] - 1;
+          uint16_t * SDA_SectorHeader = reinterpret_cast <uint16_t*> ( Data );
+          
+          do {
+
+            SDA_FreeSector++;
+            
+            switch ( SD_Read( SDA_FreeSector ) ) {
+
+              case SD_RESPONSE_FAILURE:
+
+                if ( SDA_FreeSector != 0xFFFFFFFF ) {
+
+                  continue; }
+
+                return SDA_RESPONSE_OVERRANGE;
+
+              case SD_RESPONSE_TIMEOUT:
+              
+                return SD_RESPONSE_TIMEOUT; } }
+          
+          while ( SDA_SectorHeader[0] == ( SDA_Session - 1 ) );
+          
+          switch ( SD_Read( SDA_Sector ) ) {
+
+            case SD_RESPONSE_FAILURE:
+
+              return SD_RESPONSE_FAILURE;
+
+            case SD_RESPONSE_TIMEOUT:
+
+              return SD_RESPONSE_TIMEOUT; }
+
+          SDA_Data[SDA_Offset] = SDA_FreeSector;
+
+          switch ( SD_Write( SDA_Sector ) ) {
+
+            case SD_RESPONSE_FAILURE:
+
+              return SD_RESPONSE_FAILURE;
+
+            case SD_RESPONSE_TIMEOUT:
+
+              return SD_RESPONSE_TIMEOUT; }
+      
+          SDA_Sector = SDA_FreeSector;
+          SDA_Offset = 0xFFFF; } }
+
+      else {
+
+        uint32_t SDA_FreeSector = SDA_Data[ SDA_Offset - 1 ] - 1;
+        uint16_t * SDA_SectorHeader = reinterpret_cast <uint16_t*> ( Data );
+        
+        do {
+
+          SDA_FreeSector++;
+
+          switch ( SD_Read( SDA_FreeSector ) ) {
+
+            case SD_RESPONSE_FAILURE:
+
+              if ( SDA_FreeSector != 0xFFFFFFFF ) {
+
+                continue; }
+
+              return SDA_RESPONSE_OVERRANGE;
+
+            case SD_RESPONSE_TIMEOUT:
+
+              return SD_RESPONSE_TIMEOUT; } }
+        
+        while ( SDA_SectorHeader[0] == ( SDA_Session - 1 ) );
+        
+        switch ( SD_Read( SDA_Sector ) ) {
+
+          case SD_RESPONSE_FAILURE:
+
+            return SD_RESPONSE_FAILURE;
+
+          case SD_RESPONSE_TIMEOUT:
+
+            return SD_RESPONSE_TIMEOUT; }
+
+        SDA_Data[SDA_Offset] = SDA_FreeSector;
+
+        switch ( SD_Write( SDA_Sector ) ) {
+
+          case SD_RESPONSE_FAILURE:
+
+            return SD_RESPONSE_FAILURE;
+
+          case SD_RESPONSE_TIMEOUT:
+
+            return SD_RESPONSE_TIMEOUT; }
+
+        SDA_Sector = SDA_FreeSector;
+
+        for ( uint16_t i = 0; i < 128; i++ ) {
+
+          SDA_Data[i] = 0x000000; }
+
+        switch ( SD_Write( SDA_Sector ) ) {
+
+          case SD_RESPONSE_FAILURE:
+
+            return SD_RESPONSE_FAILURE;
+
+          case SD_RESPONSE_TIMEOUT:
+
+            return SD_RESPONSE_TIMEOUT; }
+      
+        SDA_Offset = 0x0000; } }
+
+    else {
+
+      if ( SDA_Sector != 0x00000000 ) {
+
+        SDA_Session = SDA_Session + 127; }
+
+      else {
+
+        SDA_Session = SDA_Session + 125; }
+    
+      SDA_Sector = SDA_Data[127];
+      SDA_Offset = 0x0000; } }
+
+  SDA_Offset = 0x0000;
+  
+  if ( SDA_Session == 0xFFFA || SDA_Sector == 0xFFFFFFFF ) {
+
+    return SDA_RESPONSE_OVERRANGE; }
+  
+  return SDA_RESPONSE_SUCCESS; }
+
+// Manage session with Secure Digital Device, which means buffering and writting data
+int8_t SDA_ManageSession ( int8_t Byte ) {
+
+  if ( SDA_Offset == 0x0200 ) {
+    
+    SDA_Sector++;
+    SDA_Offset = 0x0000; }
+  
+  if ( SDA_Offset == 0x0000 ) {
+
+    int8_t Retry = 3;
+    uint16_t * SDA_SectorHeader = reinterpret_cast <uint16_t*> ( Data );
+    
+    for ( uint16_t i = 0; i < 512; i++ ) {
+    
+      Data[i] = 0x00; }
+    
+    SDA_SectorHeader[0] = SDA_Session;
+    
+    do {
+
+      if ( SDA_Sector == 0xFFFFFFFF ) {
+
+        return SDA_RESPONSE_OVERRANGE; }
+      
+      switch ( SD_Write( SDA_Sector ) ) {
+        
+        case SD_RESPONSE_SUCCESS:
+          
+          SDA_Offset = 0x0002;
+          
+          break;
+          
+        case SD_RESPONSE_FAILURE:
+          
+          SDA_Sector++;
+          
+          break;
+        
+        case SD_RESPONSE_TIMEOUT:
+          
+          if ( !Retry ) {
+            
+            SDA_Sector++;
+            
+            Retry = 3; }
+          
+          else {
+            
+            Retry--; }
+          
+          break; } }
+    
+    while ( SDA_Offset != 0x0002 ); }
+  
+  Data[SDA_Offset] = Byte;
+  
+  if ( ( SDA_Offset + 1 ) == 0x0200 ) {
+
+    int8_t Retry;
+    int8_t Response;
+    
+    for ( Retry = 3; Retry > 0; Retry-- ) {
+
+      Response = SD_Write( SDA_Sector );
+
+      if ( Response != SD_RESPONSE_TIMEOUT ) {
+
+        break; } }
+    
+    if ( !Retry || Response == SD_RESPONSE_FAILURE ) {
+
+      return SDA_RESPONSE_FAILURE; } }
+
+  SDA_Offset++;
+
+  return SDA_RESPONSE_SUCCESS; }
+
+// Manage session with Secure Digital Device, which means buffering and writting data
+int8_t SDA_ManageSession ( int8_t * Bytes, uint16_t Size ) {
+  
+  for ( uint16_t i = 0; i < Size; i++ ) {
+
+    switch( SDA_ManageSession( Bytes[i] ) ) {
+
+      case SDA_RESPONSE_FAILURE:
+
+        return SDA_RESPONSE_FAILURE;
+
+      case SDA_RESPONSE_OVERRANGE:
+
+        return SDA_RESPONSE_OVERRANGE; } }
+
+  return SDA_RESPONSE_SUCCESS; }
